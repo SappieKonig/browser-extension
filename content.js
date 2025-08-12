@@ -2,12 +2,28 @@ console.log('Content script loaded');
 let chatBoxContainer = null;
 let isVisible = false;
 let currentDomain = null;
+let privacyAgreed = false;
 
 // Get current domain
 try {
   currentDomain = window.location.hostname;
 } catch (error) {
   currentDomain = 'unknown';
+}
+
+// Always set up message listener for popup communication
+setupMessageListener();
+
+// Check privacy agreement before initializing chat functionality
+chrome.storage.local.get(['privacyAgreed'], (result) => {
+  privacyAgreed = result.privacyAgreed || false;
+  if (privacyAgreed) {
+    initializeChatBox();
+  }
+});
+
+function initializeChatBox() {
+  // Only initialize if privacy is agreed to (message listener already set up)
 }
 
 function createChatBox() {
@@ -18,16 +34,17 @@ function createChatBox() {
   chatBoxContainer.innerHTML = `
     <div class="chat-header">
       <span class="chat-title">Chat Assistant</span>
+      <button class="chat-feedback" id="chat-feedback-btn">Feedback</button>
       <button class="chat-clear" id="chat-clear-btn">Clear</button>
       <button class="chat-close" id="chat-close-btn">×</button>
     </div>
     <div class="chat-messages" id="chat-messages">
-      <div class="message assistant-message">
+      <div class="message assistant-message" data-original-text="Hello! How can I help you today?">
         <div class="message-content">Hello! How can I help you today?</div>
       </div>
     </div>
     <div class="chat-input-container">
-      <textarea id="chat-input" placeholder="Type your message..." rows="1"></textarea>
+      <textarea id="chat-input" placeholder="Type your message..." rows="5"></textarea>
       <button id="chat-send-btn">Send</button>
     </div>
   `;
@@ -43,6 +60,7 @@ function setupEventListeners() {
   const chatInput = document.getElementById('chat-input');
   const closeButton = document.getElementById('chat-close-btn');
   const clearButton = document.getElementById('chat-clear-btn');
+  const feedbackButton = document.getElementById('chat-feedback-btn');
 
   sendButton.addEventListener('click', sendMessage);
   chatInput.addEventListener('keypress', (e) => {
@@ -53,10 +71,11 @@ function setupEventListeners() {
   });
 
   // Auto-resize textarea
-  chatInput.addEventListener('input', autoResizeTextarea);
+  // chatInput.addEventListener('input', autoResizeTextarea); // Disabled for fixed height
   
   closeButton.addEventListener('click', hideChatBox);
   clearButton.addEventListener('click', clearChatHistory);
+  feedbackButton.addEventListener('click', showFeedbackModal);
 }
 
 function parseMarkdown(text) {
@@ -147,22 +166,16 @@ async function sendMessage() {
 
   addMessage(message, 'user');
   chatInput.value = '';
-  
-  // Add loading message
-  const loadingMessage = addLoadingMessage();
-  
   saveChatHistory();
   
   // Get configuration, session, and credentials from storage
-  chrome.storage.local.get(['authToken', 'apiKey', 'sessionIds', 'n8nCredentials'], async (result) => {
-    if (!result.authToken) {
-      removeLoadingMessage(loadingMessage);
-      addMessage('Error: Service auth token not configured. Please configure it in the extension popup.', 'assistant');
+  chrome.storage.local.get(['googleToken', 'userInfo', 'apiKey', 'anthropicApiKey', 'sessionIds', 'n8nCredentials'], async (result) => {
+    if (!result.googleToken) {
+      addMessage('Error: Please sign in with Google using the extension popup.', 'assistant');
       return;
     }
     
     if (!result.apiKey) {
-      removeLoadingMessage(loadingMessage);
       addMessage('Error: n8n API key not configured. Please configure it in the extension popup.', 'assistant');
       return;
     }
@@ -174,7 +187,6 @@ async function sendMessage() {
       // Extract the base URL (protocol + hostname)
       apiUrl = `${currentUrl.protocol}//${currentUrl.hostname}/`;
     } catch (error) {
-      removeLoadingMessage(loadingMessage);
       addMessage('Error: Could not determine API URL from current page.', 'assistant');
       return;
     }
@@ -183,28 +195,34 @@ async function sendMessage() {
     const sessionIds = result.sessionIds || {};
     const sessionId = sessionIds[currentDomain] || null;
     
-    // Use SSE for streaming response
-    const response = await fetch(CONFIG.SERVICE_URL, {
+    let loadingMessage = null;
+    
+    try {
+      // Use SSE for streaming response
+      const response = await fetch(`${CONFIG.SERVICE_URL}/chat`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
           message: message,
-          auth_token: result.authToken,
+          google_token: result.googleToken,
           api_key: result.apiKey,
           api_url: apiUrl,
           session_id: sessionId,
-          n8n_credentials: result.n8nCredentials
+          n8n_credentials: result.n8nCredentials,
+          anthropic_api_key: result.anthropicApiKey
         })
       });
       
       if (!response.ok) {
-        removeLoadingMessage(loadingMessage);
         const error = await response.text();
-        addMessage(`Error: ${error}`, 'assistant');
+        addMessage(`Server Error: ${error}`, 'assistant');
         return;
       }
+      
+      // Request successful, now show loading message
+      loadingMessage = addLoadingMessage();
       
       // Track session ID from result
       let sessionIdReceived = null;
@@ -236,6 +254,9 @@ async function sendMessage() {
                 removeLoadingMessage(loadingMessage);
                 addMessage(resultData.text, 'assistant');
                 sessionIdReceived = resultData.session_id;
+                
+                // Update trial status after successful request
+                updateTrialStatusAfterRequest();
               } else if (message.type === 'error') {
                 removeLoadingMessage(loadingMessage);
                 addMessage(`Error: ${message.data}`, 'assistant');
@@ -273,7 +294,21 @@ async function sendMessage() {
         }, 2000);
       }, 1000);
     
-    saveChatHistory();
+      saveChatHistory();
+      
+    } catch (error) {
+      // Network or other errors
+      if (loadingMessage) {
+        removeLoadingMessage(loadingMessage);
+      }
+      
+      if (error.name === 'TypeError' && error.message.includes('fetch')) {
+        addMessage('Network Error: Unable to reach server. Please check your connection.', 'assistant');
+      } else {
+        addMessage(`Error: ${error.message}`, 'assistant');
+      }
+      console.error('Chat request failed:', error);
+    }
   });
 }
 
@@ -281,6 +316,9 @@ function addMessage(text, sender) {
   const messagesContainer = document.getElementById('chat-messages');
   const messageDiv = document.createElement('div');
   messageDiv.className = `message ${sender}-message`;
+  
+  // Store original text as data attribute for saving
+  messageDiv.setAttribute('data-original-text', text);
   
   // Parse markdown for assistant messages, escape HTML for user messages
   const content = sender === 'assistant' ? parseMarkdown(text) : escapeHtml(text);
@@ -369,7 +407,9 @@ function saveChatHistory() {
   
   messageElements.forEach(msg => {
     const isAssistant = msg.classList.contains('assistant-message');
-    const content = msg.querySelector('.message-content').textContent;
+    // Use original text if available, fallback to textContent for backward compatibility
+    const originalText = msg.getAttribute('data-original-text');
+    const content = originalText || msg.querySelector('.message-content').textContent;
     messages.push({
       text: content,
       sender: isAssistant ? 'assistant' : 'user'
@@ -395,7 +435,7 @@ function loadChatHistory() {
 function clearChatHistory() {
   const messagesContainer = document.getElementById('chat-messages');
   messagesContainer.innerHTML = `
-    <div class="message assistant-message">
+    <div class="message assistant-message" data-original-text="Hello! How can I help you today?">
       <div class="message-content">Hello! How can I help you today?</div>
     </div>
   `;
@@ -410,6 +450,134 @@ function clearChatHistory() {
   });
 }
 
+function showFeedbackModal() {
+  // Create modal overlay
+  const modalOverlay = document.createElement('div');
+  modalOverlay.id = 'feedback-modal-overlay';
+  modalOverlay.style.cssText = `
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.7);
+    z-index: 10001;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  `;
+  
+  // Create modal content
+  const modal = document.createElement('div');
+  modal.style.cssText = `
+    background: #fff;
+    padding: 20px;
+    border-radius: 8px;
+    width: 400px;
+    max-width: 90vw;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+  `;
+  
+  modal.innerHTML = `
+    <h3 style="margin: 0 0 15px 0; color: #292929; font-size: 16px;">Send Feedback</h3>
+    <textarea id="feedback-text" placeholder="Your feedback helps us improve..." style="
+      width: 100%;
+      height: 100px;
+      padding: 8px;
+      border: 1px solid #B32D2D;
+      border-radius: 4px;
+      font-family: inherit;
+      resize: vertical;
+      box-sizing: border-box;
+    " rows="4"></textarea>
+    <div style="display: flex; gap: 10px; margin-top: 15px;">
+      <button id="feedback-cancel" style="
+        flex: 1;
+        padding: 8px;
+        background: #292929;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 13px;
+      ">Cancel</button>
+      <button id="feedback-submit" style="
+        flex: 1;
+        padding: 8px;
+        background: #FF4040;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 13px;
+      ">Send Feedback</button>
+    </div>
+  `;
+  
+  modalOverlay.appendChild(modal);
+  document.body.appendChild(modalOverlay);
+  
+  // Focus on textarea
+  const textarea = document.getElementById('feedback-text');
+  textarea.focus();
+  
+  // Set up event listeners
+  document.getElementById('feedback-cancel').addEventListener('click', () => {
+    document.body.removeChild(modalOverlay);
+  });
+  
+  document.getElementById('feedback-submit').addEventListener('click', async () => {
+    const feedback = textarea.value.trim();
+    if (!feedback) {
+      alert('Please enter your feedback');
+      return;
+    }
+    
+    const submitBtn = document.getElementById('feedback-submit');
+    submitBtn.textContent = 'Sending...';
+    submitBtn.disabled = true;
+    
+    try {
+      // Send feedback directly to Web3Forms
+      const formData = new FormData();
+      formData.append('access_key', 'b0ddd676-971f-439d-9f12-92f9a4b53acf');
+      formData.append('subject', 'New feedback from Workflow Agent Chat');
+      formData.append('message', feedback);
+      formData.append('from_name', 'Chat User');
+      formData.append('timestamp', new Date().toISOString());
+      
+      const response = await fetch('https://api.web3forms.com/submit', {
+        method: 'POST',
+        body: formData
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        if (data.success) {
+          alert('Feedback sent successfully! Thank you.');
+          document.body.removeChild(modalOverlay);
+        } else {
+          throw new Error('Web3Forms submission failed');
+        }
+      } else {
+        throw new Error(`HTTP ${response.status}`);
+      }
+    } catch (error) {
+      console.error('Feedback submission error:', error);
+      alert('Failed to send feedback. Please try again.');
+      submitBtn.textContent = 'Send Feedback';
+      submitBtn.disabled = false;
+    }
+  });
+  
+  // Close on overlay click
+  modalOverlay.addEventListener('click', (e) => {
+    if (e.target === modalOverlay) {
+      document.body.removeChild(modalOverlay);
+    }
+  });
+}
+
 chrome.storage.local.get(['domainStates'], (result) => {
   const domainStates = result.domainStates || {};
   const isEnabled = domainStates[currentDomain] || false;
@@ -418,25 +586,34 @@ chrome.storage.local.get(['domainStates'], (result) => {
   }
 });
 
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  console.log('Message received:', request);
-  if (request.action === 'toggleChatBox') {
-    console.log('Toggling chat box, current visibility:', isVisible);
-    
-    // Update domain if provided in message
-    if (request.domain && request.domain !== currentDomain) {
-      currentDomain = request.domain;
+function setupMessageListener() {
+  chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    console.log('Message received:', request);
+    if (request.action === 'toggleChatBox') {
+      console.log('Toggling chat box, current visibility:', isVisible);
+      
+      // Check privacy agreement before allowing chat functionality
+      if (!privacyAgreed) {
+        console.log('Privacy not agreed, cannot toggle chat box');
+        sendResponse({success: false, error: 'Privacy agreement required', domain: currentDomain});
+        return true;
+      }
+      
+      // Update domain if provided in message
+      if (request.domain && request.domain !== currentDomain) {
+        currentDomain = request.domain;
+      }
+      
+      if (isVisible) {
+        hideChatBox();
+      } else {
+        showChatBox();
+      }
+      sendResponse({success: true, visible: isVisible, domain: currentDomain});
     }
-    
-    if (isVisible) {
-      hideChatBox();
-    } else {
-      showChatBox();
-    }
-    sendResponse({success: true, visible: isVisible, domain: currentDomain});
-  }
-  return true;
-});
+    return true;
+  });
+}
 
 // Credential interception for n8n
 if (window.location.hostname.includes('.app.n8n.cloud')) {
@@ -458,4 +635,24 @@ if (window.location.hostname.includes('.app.n8n.cloud')) {
       payload: message.payload 
     });
   });
+}
+
+// Update trial status after a successful chat request
+async function updateTrialStatusAfterRequest() {
+  try {
+    // Get user info from storage
+    const result = await new Promise((resolve) => {
+      chrome.storage.local.get(['userInfo'], resolve);
+    });
+    
+    if (result.userInfo && result.userInfo.email) {
+      // Send message to popup to update trial status
+      chrome.runtime.sendMessage({
+        action: 'updateTrialStatus',
+        email: result.userInfo.email
+      });
+    }
+  } catch (error) {
+    console.error('Failed to trigger trial status update:', error);
+  }
 }

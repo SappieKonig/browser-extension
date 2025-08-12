@@ -1,18 +1,21 @@
 {
   "manifest_version": 3,
-  "name": "Right Side Chat Box",
-  "version": "1.1",
+  "name": "Linker",
+  "version": "1.4",
   "description": "A chat box that appears on the right side of web pages",
   "permissions": [
     "activeTab",
     "storage",
     "tabs",
-    "scripting"
+    "scripting",
+    "identity"
   ],
   "host_permissions": [
-    "http://127.0.0.1:8000/*",
-    "http://localhost:8000/*",
-    "https://*.app.n8n.cloud/*"
+    "https://*.app.n8n.cloud/*",
+    "https://accounts.google.com/*",
+    "https://oauth2.googleapis.com/*",
+    "https://www.googleapis.com/*",
+    "https://api.automaton.fit/*"
   ],
   "background": {
     "service_worker": "service-worker.js"
@@ -44,5 +47,10 @@
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
-  }
+  },
+  "oauth2": {
+    "client_id": "288322780619-qagdho4kobuips744oj6su1vein9ou0h.apps.googleusercontent.com",
+    "scopes": ["openid", "email", "profile"]
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAhdDd5XjoyPyxnT3YjfDZuCpnIOO6tRrR3ZDDLlka5uWqVb3k41Wiew9p+odSBKWLpKDIuCE2ExaPJKpFklKyLamxN7K0Rmjgi86D7EPF9g/afc74SyCN3YrBP7aJxJ80kfx7J+/A2FlbNm5mviCW+4yqiYQJZY4OmofjW/wMqh4/gRTDhPJi/C3pdcvjHy7KdaJn7u10gtM4yk6H9JvM53A8XpV92aR5+MWn/f8XFBf78I5XFA6cQkT+fHWjMs6ku/2KgaNLwUU7R8Ml/r0XFG4dv8mTFFkLfYVuGe+S+riCI7t98QoSZ0PPNSxpXXNJm9022egh/YHXS2n+lGrhZwIDAQAB"
 }
